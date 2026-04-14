@@ -250,6 +250,17 @@
 
     <!-- ── Dante Network tab ── -->
     <div class="tab-panel" id="tab-network">
+      <!-- Interface picker -->
+      <div class="form-section" style="border-top:none;border-bottom:1px solid var(--border);gap:6px">
+        <div>
+          <label class="field-label">Dante Network Interface</label>
+          <select id="iface-select" onchange="onIfaceChange()">
+            <option value="">— loading… —</option>
+          </select>
+        </div>
+        <button class="btn" id="discover-btn" onclick="startDiscovery()">Start Discovery</button>
+        <div id="iface-status"></div>
+      </div>
       <div class="panel-title">Discovered Devices</div>
       <div class="scrollable" id="device-list"></div>
       <div class="form-section">
@@ -314,6 +325,57 @@ function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.getElementById(`tab-${name}`).classList.add('active');
   document.querySelectorAll('.tab')[name === 'audio' ? 0 : 1].classList.add('active');
+}
+
+// ─── Interface picker ─────────────────────────────────────────────────────────
+async function loadInterfaces() {
+  try {
+    const res   = await fetch('/api/interfaces');
+    const ifaces = await res.json();
+    const sel   = document.getElementById('iface-select');
+    sel.innerHTML = ifaces.map(i =>
+      `<option value="${esc(i.address)}">${esc(i.name)} — ${esc(i.address)}</option>`
+    ).join('');
+    // Auto-select anything that looks like Ethernet/USB (not Wi-Fi)
+    const dante = ifaces.find(i => /eth|usb|en[^w]|ethernet/i.test(i.name));
+    if (dante) sel.value = dante.address;
+    setIfaceStatus(ifaces.length
+      ? `${ifaces.length} interface${ifaces.length > 1 ? 's' : ''} found — pick your Dante adapter then click Start Discovery`
+      : 'No network interfaces found', ifaces.length ? 'warn' : 'error');
+  } catch (e) {
+    setIfaceStatus('Could not load interfaces: ' + e.message, 'error');
+  }
+}
+
+function onIfaceChange() {
+  setIfaceStatus('Click Start Discovery to scan this interface', 'warn');
+}
+
+async function startDiscovery() {
+  const iface = document.getElementById('iface-select').value;
+  if (!iface) return;
+  const btn = document.getElementById('discover-btn');
+  btn.disabled = true; btn.textContent = 'Scanning…';
+  setIfaceStatus(`Querying mDNS on ${iface}…`, 'warn');
+  try {
+    const res = await fetch('/api/discover', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ interface: iface }),
+    });
+    const data = await res.json();
+    if (data.ok) setIfaceStatus(`Scanning ${iface} — devices will appear below`, 'ok');
+    else         setIfaceStatus('Server error: ' + JSON.stringify(data), 'error');
+  } catch (e) {
+    setIfaceStatus('Request failed: ' + e.message, 'error');
+  }
+  btn.disabled = false; btn.textContent = 'Start Discovery';
+}
+
+function setIfaceStatus(msg, type) {
+  const cls = type === 'ok' ? '' : type === 'warn' ? 'warn' : 'error-box';
+  document.getElementById('iface-status').innerHTML =
+    `<div class="info-box ${cls}" style="margin:0;margin-top:2px">${esc(msg)}</div>`;
 }
 
 // ─── WebSocket (for network discovery + simulated levels) ────────────────────
@@ -766,6 +828,7 @@ function esc(s) {
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 connectWS();
+loadInterfaces();
 updateCount();
 requestAnimationFrame(renderLoop);
 </script>

@@ -1,262 +1,269 @@
 'use strict';
 
-const express = require('express');
+const express   = require('express');
 const { WebSocketServer } = require('ws');
-const http = require('http');
-const dgram = require('dgram');
-const path = require('path');
+const http      = require('http');
+const os        = require('os');
+const path      = require('path');
+const mDNS      = require('multicast-dns');
 
-const app = express();
+const app    = express();
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
+const wss    = new WebSocketServer({ server });
 
+app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ─── Dante device registry ────────────────────────────────────────────────────
-// Map of deviceId -> { name, address, txChannels: [], rxChannels: [] }
-const devices = new Map();
-// Map of `${txDevice}:${txCh}:${rxDevice}:${rxCh}` -> { levels, peak, ... }
-const crossPoints = new Map();
-
-// ─── mDNS discovery ───────────────────────────────────────────────────────────
-let mdns;
-try {
-  mdns = require('mdns-js');
-  mdns.excludeInterface('0.0.0.0');
-
-  const browser = mdns.createBrowser(
-    mdns.tcp('netaudio-arc'),   // Dante ARC service
-    mdns.udp('netaudio-arc'),
-    mdns.tcp('netaudio-dbc'),   // Dante Browse & Connect
-  );
-
-  browser.on('ready', () => browser.discover());
-
-  browser.on('update', (data) => {
-    const name = (data.fullname || data.host || '').replace(/\._netaudio.*/, '');
-    const address = data.addresses && data.addresses[0];
-    if (!name || !address) return;
-
-    const id = name.toLowerCase().replace(/\s+/g, '-');
-    if (!devices.has(id)) {
-      const numTx = 2 + Math.floor(Math.random() * 14); // 2-16 tx channels
-      const numRx = 2 + Math.floor(Math.random() * 14);
-      registerDevice(id, name, address, numTx, numRx, true);
-      console.log(`[mDNS] Found Dante device: ${name} @ ${address}`);
-      broadcastDeviceList();
-    }
-  });
-} catch (e) {
-  console.warn('[mDNS] Discovery unavailable:', e.message);
+// ─── Network interface helpers ────────────────────────────────────────────────
+function getInterfaces() {
+  return Object.entries(os.networkInterfaces())
+    .flatMap(([name, addrs]) =>
+      (addrs || [])
+        .filter(a => a.family === 'IPv4' && !a.internal)
+        .map(a => ({ name, address: a.address, netmask: a.netmask }))
+    );
 }
+
+// ─── Device registry ──────────────────────────────────────────────────────────
+const devices = new Map();   // id → device
 
 function registerDevice(id, name, address, numTx, numRx, real = false) {
-  const txChannels = Array.from({ length: numTx }, (_, i) => ({
-    id: i + 1,
-    name: `${name} Tx ${i + 1}`,
-  }));
-  const rxChannels = Array.from({ length: numRx }, (_, i) => ({
-    id: i + 1,
-    name: `${name} Rx ${i + 1}`,
-  }));
+  if (devices.has(id)) return;
+  const txChannels = Array.from({ length: numTx }, (_, i) => ({ id: i + 1, name: `${name} Tx ${i + 1}` }));
+  const rxChannels = Array.from({ length: numRx }, (_, i) => ({ id: i + 1, name: `${name} Rx ${i + 1}` }));
   devices.set(id, { id, name, address, txChannels, rxChannels, real });
+  console.log(`[device] ${real ? 'Live' : 'Demo'}: ${name} @ ${address}`);
+  broadcastDeviceList();
 }
 
-// ─── Simulated devices (always present for demo) ──────────────────────────────
+// Demo devices (always present so the UI isn't empty on first load)
 const DEMO_DEVICES = [
-  { id: 'console-1', name: 'Console 1',        address: '192.168.1.10', tx: 16, rx: 16 },
-  { id: 'stagebox-a', name: 'Stage Box A',     address: '192.168.1.20', tx: 16, rx: 8  },
-  { id: 'ioa-rack',   name: 'I/O Rack',        address: '192.168.1.30', tx: 8,  rx: 8  },
-  { id: 'dvs-pc',     name: 'DVS (PC)',         address: '192.168.1.40', tx: 8,  rx: 8  },
+  { id: 'console-1',  name: 'Console 1',   address: '192.168.1.10', tx: 16, rx: 16 },
+  { id: 'stagebox-a', name: 'Stage Box A', address: '192.168.1.20', tx: 16, rx: 8  },
+  { id: 'ioa-rack',   name: 'I/O Rack',    address: '192.168.1.30', tx: 8,  rx: 8  },
+  { id: 'dvs-pc',     name: 'DVS (PC)',     address: '192.168.1.40', tx: 8,  rx: 8  },
 ];
 for (const d of DEMO_DEVICES) registerDevice(d.id, d.name, d.address, d.tx, d.rx, false);
 
-// ─── Cross-point level simulation ─────────────────────────────────────────────
-// Each active cross-point gets a simulated signal with:
-//   rms  – current RMS level (dBFS, −60..0)
-//   peak – short-term peak hold (dBFS)
-//   clip – clip indicator
-const activeCrossPoints = new Map(); // key -> CrossPointState
+// ─── mDNS discovery ───────────────────────────────────────────────────────────
+// Dante devices advertise these service types via mDNS (Zeroconf / Bonjour):
+//   _netaudio-arc._udp  – Audinate Remote Control
+//   _netaudio-dbc._udp  – Dante Browse & Connect
+const DANTE_SERVICES = ['_netaudio-arc._udp.local', '_netaudio-dbc._udp.local'];
 
-class CrossPointState {
-  constructor(key) {
-    this.key = key;
-    // Randomise signal character per cross-point
-    this.baseLevel = -18 - Math.random() * 20; // −18 to −38 dBFS nominal
-    this.variance  = 4 + Math.random() * 8;    // dynamic range of signal
-    this.phase     = Math.random() * Math.PI * 2;
-    this.freq      = 0.3 + Math.random() * 1.2; // Hz of slow modulation
-    this.rms       = this.baseLevel;
-    this.peak      = this.baseLevel;
-    this.peakHold  = this.baseLevel;
-    this.peakHoldTimer = 0;
-    this.clip      = false;
-    this.clipTimer = 0;
-    this.silent    = Math.random() < 0.15; // 15% chance of silent channel
-  }
+let mdnsInstance   = null;   // current multicast-dns instance
+let queryInterval  = null;   // repeating PTR query timer
+let currentIface   = null;   // currently selected interface address
 
-  tick(dt) {
-    if (this.silent) {
-      this.rms  = -60;
-      this.peak = -60;
-      this.peakHold = -60;
-      this.clip = false;
-      return;
-    }
+// Pending SRV/A lookups: name → { service, host, port }
+const pendingSRV = new Map();
+const pendingA   = new Map();  // hostname → device name
 
-    this.phase += this.freq * dt * 2 * Math.PI;
-    const mod = Math.sin(this.phase) * this.variance * 0.5;
-    const noise = (Math.random() - 0.5) * 4;
-    this.rms = Math.max(-60, Math.min(0, this.baseLevel + mod + noise));
+function startDiscovery(ifaceAddress) {
+  stopDiscovery();
+  currentIface = ifaceAddress;
+  console.log(`[mDNS] Starting discovery on interface ${ifaceAddress}`);
 
-    // Peak is a few dB above RMS
-    const instantPeak = this.rms + 3 + Math.random() * 3;
-    this.peak = Math.max(-60, Math.min(3, instantPeak));
+  mdnsInstance = mDNS({ interface: ifaceAddress, reuseAddr: true });
 
-    // Peak hold
-    if (this.peak > this.peakHold) {
-      this.peakHold = this.peak;
-      this.peakHoldTimer = 2.5; // hold for 2.5s
-    } else {
-      this.peakHoldTimer -= dt;
-      if (this.peakHoldTimer <= 0) {
-        this.peakHold = Math.max(this.peakHold - 8 * dt, this.peak);
+  mdnsInstance.on('response', (response) => {
+    // Collect all records from all sections
+    const records = [
+      ...(response.answers   || []),
+      ...(response.additionals || []),
+    ];
+
+    // --- PTR records tell us a service instance name exists ---
+    for (const r of records) {
+      if (r.type !== 'PTR') continue;
+      if (!DANTE_SERVICES.some(s => r.name === s)) continue;
+      const instanceName = r.data; // e.g. "My-Dante-Device._netaudio-arc._udp.local"
+      if (!pendingSRV.has(instanceName)) {
+        pendingSRV.set(instanceName, { name: instanceName });
       }
     }
 
-    // Clip
-    if (this.peak >= 0) {
-      this.clip = true;
-      this.clipTimer = 3;
-    } else if (this.clipTimer > 0) {
-      this.clipTimer -= dt;
-      if (this.clipTimer <= 0) this.clip = false;
+    // --- SRV records give us hostname + port ---
+    for (const r of records) {
+      if (r.type !== 'SRV') continue;
+      const entry = pendingSRV.get(r.name);
+      if (!entry) continue;
+      entry.host = r.data.target;
+      entry.port = r.data.port;
+      // Friendly device name = first label of instance name, de-escaped
+      entry.friendlyName = r.name.split('.')[0].replace(/_/g, ' ').replace(/\\032/g, ' ');
+    }
+
+    // --- A records give us the IP address ---
+    for (const r of records) {
+      if (r.type !== 'A') continue;
+      // Match against pending SRV host fields
+      for (const [, entry] of pendingSRV) {
+        if (entry.host && (entry.host === r.name || entry.host.replace(/\.$/, '') === r.name.replace(/\.$/, ''))) {
+          if (!entry.address) {
+            entry.address = r.data;
+          }
+        }
+      }
+      // Also store for later lookup
+      pendingA.set(r.name, r.data);
+    }
+
+    // --- Flush any complete entries ---
+    for (const [key, entry] of pendingSRV) {
+      const address = entry.address || pendingA.get(entry.host) || pendingA.get((entry.host || '').replace(/\.$/, '') + '.');
+      if (!address) continue;
+
+      const name = entry.friendlyName || entry.name.split('.')[0];
+      const id   = name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+
+      if (!devices.has(id) || !devices.get(id).real) {
+        // Remove any demo device with same id
+        if (devices.has(id) && !devices.get(id).real) devices.delete(id);
+
+        const numTx = 2 + Math.floor(Math.random() * 14);
+        const numRx = 2 + Math.floor(Math.random() * 14);
+        registerDevice(id, name, address, numTx, numRx, true);
+      }
+      pendingSRV.delete(key);
+    }
+  });
+
+  mdnsInstance.on('error', (err) => {
+    console.error('[mDNS] Error:', err.message);
+  });
+
+  // Send PTR queries immediately and then every 5 s
+  function query() {
+    for (const service of DANTE_SERVICES) {
+      mdnsInstance.query({ questions: [{ name: service, type: 'PTR' }] });
     }
   }
+  query();
+  queryInterval = setInterval(query, 5000);
+}
 
+function stopDiscovery() {
+  if (queryInterval) { clearInterval(queryInterval); queryInterval = null; }
+  if (mdnsInstance)  { mdnsInstance.destroy(); mdnsInstance = null; }
+  pendingSRV.clear();
+  pendingA.clear();
+}
+
+// ─── REST API ─────────────────────────────────────────────────────────────────
+app.get('/api/interfaces', (_req, res) => {
+  res.json(getInterfaces());
+});
+
+app.post('/api/discover', (req, res) => {
+  const { interface: iface } = req.body;
+  if (!iface) return res.status(400).json({ error: 'interface address required' });
+  // Remove all live (real) devices so we get a fresh discovery
+  for (const [id, d] of devices) { if (d.real) devices.delete(id); }
+  broadcastDeviceList();
+  startDiscovery(iface);
+  res.json({ ok: true, interface: iface });
+});
+
+// ─── WebSocket ────────────────────────────────────────────────────────────────
+const activeCrossPoints = new Map();
+
+class CrossPointState {
+  constructor() {
+    this.baseLevel   = -18 - Math.random() * 20;
+    this.variance    = 4   + Math.random() * 8;
+    this.phase       = Math.random() * Math.PI * 2;
+    this.freq        = 0.3 + Math.random() * 1.2;
+    this.rms         = this.baseLevel;
+    this.peak        = this.baseLevel;
+    this.peakHold    = this.baseLevel;
+    this.peakHoldTimer = 0;
+    this.clip        = false;
+    this.clipTimer   = 0;
+    this.silent      = Math.random() < 0.15;
+  }
+  tick(dt) {
+    if (this.silent) { this.rms = this.peak = this.peakHold = -60; this.clip = false; return; }
+    this.phase += this.freq * dt * 2 * Math.PI;
+    const mod   = Math.sin(this.phase) * this.variance * 0.5;
+    const noise = (Math.random() - 0.5) * 4;
+    this.rms  = Math.max(-60, Math.min(0, this.baseLevel + mod + noise));
+    this.peak = Math.max(-60, Math.min(3, this.rms + 3 + Math.random() * 3));
+    if (this.peak > this.peakHold) {
+      this.peakHold = this.peak; this.peakHoldTimer = 2.5;
+    } else {
+      this.peakHoldTimer -= dt;
+      if (this.peakHoldTimer <= 0) this.peakHold = Math.max(this.peakHold - 8 * dt, this.peak);
+    }
+    if (this.peak >= 0) { this.clip = true; this.clipTimer = 3; }
+    else if (this.clipTimer > 0) { this.clipTimer -= dt; if (this.clipTimer <= 0) this.clip = false; }
+  }
   toJSON() {
-    return {
-      rms:      parseFloat(this.rms.toFixed(1)),
-      peak:     parseFloat(this.peak.toFixed(1)),
-      peakHold: parseFloat(this.peakHold.toFixed(1)),
-      clip:     this.clip,
-    };
+    return { rms: +this.rms.toFixed(1), peak: +this.peak.toFixed(1), peakHold: +this.peakHold.toFixed(1), clip: this.clip };
   }
 }
 
-// ─── WebSocket handling ───────────────────────────────────────────────────────
 function broadcastDeviceList() {
   const payload = JSON.stringify({
     type: 'devices',
-    data: [...devices.values()].map(d => ({
-      id:         d.id,
-      name:       d.name,
-      address:    d.address,
-      real:       d.real,
-      txChannels: d.txChannels,
-      rxChannels: d.rxChannels,
-    })),
+    data: [...devices.values()],
   });
-  for (const ws of wss.clients) {
-    if (ws.readyState === ws.OPEN) ws.send(payload);
-  }
+  for (const ws of wss.clients) if (ws.readyState === ws.OPEN) ws.send(payload);
 }
 
 wss.on('connection', (ws) => {
-  // Send current device list immediately
-  ws.send(JSON.stringify({
-    type: 'devices',
-    data: [...devices.values()].map(d => ({
-      id:         d.id,
-      name:       d.name,
-      address:    d.address,
-      real:       d.real,
-      txChannels: d.txChannels,
-      rxChannels: d.rxChannels,
-    })),
-  }));
-
-  // Send list of active cross-points for this client
   ws.subscribedCrossPoints = new Set();
+  ws.send(JSON.stringify({ type: 'devices', data: [...devices.values()] }));
 
   ws.on('message', (raw) => {
-    let msg;
-    try { msg = JSON.parse(raw); } catch { return; }
-
+    let msg; try { msg = JSON.parse(raw); } catch { return; }
     if (msg.type === 'subscribe') {
-      // { type:'subscribe', txDevice, txChannel, rxDevice, rxChannel }
       const key = `${msg.txDevice}:${msg.txChannel}:${msg.rxDevice}:${msg.rxChannel}`;
       ws.subscribedCrossPoints.add(key);
-      if (!activeCrossPoints.has(key)) {
-        activeCrossPoints.set(key, new CrossPointState(key));
-      }
+      if (!activeCrossPoints.has(key)) activeCrossPoints.set(key, new CrossPointState());
     }
-
     if (msg.type === 'unsubscribe') {
-      const key = `${msg.txDevice}:${msg.txChannel}:${msg.rxDevice}:${msg.rxChannel}`;
-      ws.subscribedCrossPoints.delete(key);
+      ws.subscribedCrossPoints.delete(`${msg.txDevice}:${msg.txChannel}:${msg.rxDevice}:${msg.rxChannel}`);
     }
-
     if (msg.type === 'subscribeAll') {
-      // Subscribe to all tx channels for a given device pair
-      const txDev = devices.get(msg.txDevice);
-      const rxDev = devices.get(msg.rxDevice);
-      if (!txDev || !rxDev) return;
-      for (const tx of txDev.txChannels) {
-        for (const rx of rxDev.rxChannels) {
-          const key = `${msg.txDevice}:${tx.id}:${msg.rxDevice}:${rx.id}`;
-          ws.subscribedCrossPoints.add(key);
-          if (!activeCrossPoints.has(key)) {
-            activeCrossPoints.set(key, new CrossPointState(key));
-          }
-        }
+      const txD = devices.get(msg.txDevice), rxD = devices.get(msg.rxDevice);
+      if (!txD || !rxD) return;
+      for (const tx of txD.txChannels) for (const rx of rxD.rxChannels) {
+        const key = `${msg.txDevice}:${tx.id}:${msg.rxDevice}:${rx.id}`;
+        ws.subscribedCrossPoints.add(key);
+        if (!activeCrossPoints.has(key)) activeCrossPoints.set(key, new CrossPointState());
       }
     }
   });
 
   ws.on('close', () => {
-    // Clean up cross-points that have no more subscribers
     for (const key of ws.subscribedCrossPoints) {
       let hasOther = false;
-      for (const other of wss.clients) {
-        if (other !== ws && other.subscribedCrossPoints && other.subscribedCrossPoints.has(key)) {
-          hasOther = true; break;
-        }
-      }
+      for (const c of wss.clients) if (c !== ws && c.subscribedCrossPoints?.has(key)) { hasOther = true; break; }
       if (!hasOther) activeCrossPoints.delete(key);
     }
   });
 });
 
-// ─── Meter broadcast loop (25 fps) ────────────────────────────────────────────
 let lastTick = Date.now();
 setInterval(() => {
-  const now = Date.now();
-  const dt  = (now - lastTick) / 1000;
-  lastTick  = now;
-
-  if (activeCrossPoints.size === 0) return;
-
-  // Tick all active states
-  for (const state of activeCrossPoints.values()) state.tick(dt);
-
-  // Build per-client payloads (only send what they subscribed to)
+  const now = Date.now(), dt = (now - lastTick) / 1000; lastTick = now;
+  if (!activeCrossPoints.size) return;
+  for (const s of activeCrossPoints.values()) s.tick(dt);
   for (const ws of wss.clients) {
-    if (ws.readyState !== ws.OPEN || !ws.subscribedCrossPoints || ws.subscribedCrossPoints.size === 0) continue;
-
+    if (ws.readyState !== ws.OPEN || !ws.subscribedCrossPoints?.size) continue;
     const levels = {};
-    for (const key of ws.subscribedCrossPoints) {
-      const state = activeCrossPoints.get(key);
-      if (state) levels[key] = state.toJSON();
-    }
-
+    for (const key of ws.subscribedCrossPoints) { const s = activeCrossPoints.get(key); if (s) levels[key] = s.toJSON(); }
     ws.send(JSON.stringify({ type: 'levels', data: levels }));
   }
-}, 40); // ~25 fps
+}, 40);
 
 // ─── Start ───────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Dante VU Meter server running on http://localhost:${PORT}`);
-  console.log('Demo devices loaded. mDNS discovery active (if network available).');
+  const ifaces = getInterfaces();
+  console.log(`\nDante VU Meter  →  http://localhost:${PORT}`);
+  console.log('\nAvailable network interfaces:');
+  for (const i of ifaces) console.log(`  ${i.name.padEnd(20)} ${i.address}`);
+  console.log('\nSelect your Dante interface in the app to start discovery.');
 });
