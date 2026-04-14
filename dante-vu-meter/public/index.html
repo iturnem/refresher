@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dante VU Meter</title>
+  <style>
+    :root {
+      --bg:        #0d0f12;
+      --surface:   #161920;
+      --surface2:  #1e2229;
+      --border:    #2a2f3a;
+      --accent:    #3a7bd5;
+      --text:      #d4d9e6;
+      --text-dim:  #6b7485;
+      --green:     #22c55e;
+      --yellow:    #eab308;
+      --red:       #ef4444;
+      --clip:      #ff2020;
+      --panel-w:   280px;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-size: 13px;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ── Header ── */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 18px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-shrink: 0;
+    }
+    header h1 {
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: .04em;
+      color: #fff;
+    }
+    header .badge {
+      font-size: 10px;
+      padding: 2px 8px;
+      border-radius: 99px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      letter-spacing: .05em;
+      text-transform: uppercase;
+    }
+    #conn-status {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+    #conn-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--text-dim);
+      transition: background .3s;
+    }
+    #conn-dot.connected { background: var(--green); box-shadow: 0 0 6px var(--green); }
+    #conn-dot.error     { background: var(--red); }
+
+    /* ── Layout ── */
+    .layout {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    /* ── Left panel ── */
+    aside {
+      width: var(--panel-w);
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+    aside .panel-title {
+      padding: 10px 14px 8px;
+      font-size: 10px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      border-bottom: 1px solid var(--border);
+    }
+    .device-list {
+      overflow-y: auto;
+      flex: 1;
+    }
+    .device-item {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      cursor: default;
+    }
+    .device-item .dev-name {
+      font-weight: 600;
+      color: #fff;
+      margin-bottom: 2px;
+    }
+    .device-item .dev-addr {
+      color: var(--text-dim);
+      font-size: 11px;
+    }
+    .device-item .dev-badge {
+      display: inline-block;
+      font-size: 9px;
+      padding: 1px 5px;
+      border-radius: 3px;
+      margin-top: 4px;
+      background: #1a3a5c;
+      color: #6aabff;
+      border: 1px solid #2a5a8c;
+    }
+    .device-item .dev-badge.real {
+      background: #1a3a22;
+      color: #4ade80;
+      border-color: #2a6a3c;
+    }
+
+    .selector-section {
+      border-top: 1px solid var(--border);
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .selector-section label {
+      font-size: 10px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      margin-bottom: 2px;
+      display: block;
+    }
+    select {
+      width: 100%;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      color: var(--text);
+      padding: 5px 8px;
+      font-size: 12px;
+      appearance: none;
+      cursor: pointer;
+    }
+    select:focus { outline: none; border-color: var(--accent); }
+
+    .btn {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 5px;
+      padding: 7px 12px;
+      font-size: 12px;
+      cursor: pointer;
+      font-weight: 500;
+      transition: background .15s;
+    }
+    .btn:hover { background: #4a8be5; }
+    .btn.secondary {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+    }
+    .btn.secondary:hover { background: var(--border); color: var(--text); }
+    .btn-row { display: flex; gap: 6px; }
+
+    /* ── Main meter area ── */
+    main {
+      flex: 1;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .meter-toolbar {
+      padding: 8px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-shrink: 0;
+      background: var(--surface);
+    }
+    .meter-toolbar .label {
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+    .meter-toolbar .value {
+      color: var(--text);
+      font-weight: 500;
+    }
+    #clear-btn { margin-left: auto; }
+    #hold-btn.active { background: #3a4a2a; border-color: var(--green); color: var(--green); }
+
+    .meter-grid {
+      flex: 1;
+      overflow: auto;
+      padding: 16px;
+      display: flex;
+      flex-wrap: wrap;
+      align-content: flex-start;
+      gap: 12px;
+    }
+
+    /* ── VU Meter card ── */
+    .vu-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 10px 10px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      width: 72px;
+      position: relative;
+      transition: border-color .2s;
+    }
+    .vu-card:hover { border-color: var(--accent); }
+    .vu-card .card-label {
+      font-size: 9px;
+      color: var(--text-dim);
+      text-align: center;
+      line-height: 1.3;
+      width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .vu-card .card-label b {
+      display: block;
+      color: var(--text);
+      font-size: 10px;
+      margin-bottom: 1px;
+    }
+    .vu-card .close-btn {
+      position: absolute;
+      top: 4px; right: 4px;
+      width: 14px; height: 14px;
+      border-radius: 3px;
+      border: none;
+      background: transparent;
+      color: var(--text-dim);
+      cursor: pointer;
+      font-size: 11px;
+      line-height: 14px;
+      text-align: center;
+      padding: 0;
+      display: none;
+    }
+    .vu-card:hover .close-btn { display: block; }
+    .vu-card .close-btn:hover { background: var(--red); color: #fff; }
+
+    /* Meter bar */
+    .meter-bar-wrap {
+      position: relative;
+      width: 32px;
+      height: 160px;
+    }
+    canvas.meter-canvas {
+      display: block;
+      width: 32px;
+      height: 160px;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+
+    /* dB readout */
+    .db-readout {
+      font-size: 11px;
+      font-family: 'Courier New', monospace;
+      font-weight: 700;
+      color: var(--green);
+      letter-spacing: -.02em;
+    }
+    .db-readout.yellow { color: var(--yellow); }
+    .db-readout.red    { color: var(--red); }
+
+    .clip-led {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: #2a0000;
+      border: 1px solid #4a1a1a;
+      transition: background .05s;
+    }
+    .clip-led.active {
+      background: var(--clip);
+      box-shadow: 0 0 8px var(--clip);
+    }
+
+    /* Scale on right side */
+    .scale {
+      position: absolute;
+      right: -22px;
+      top: 0;
+      height: 160px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      pointer-events: none;
+    }
+    .scale span {
+      font-size: 8px;
+      color: var(--text-dim);
+      line-height: 1;
+      text-align: right;
+    }
+
+    .empty-state {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-dim);
+      gap: 10px;
+      text-align: center;
+    }
+    .empty-state svg { opacity: .3; }
+    .empty-state p { font-size: 13px; }
+    .empty-state p.hint { font-size: 11px; opacity: .6; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Dante VU Meter</h1>
+  <span class="badge">Network Audio Monitor</span>
+  <div id="conn-status">
+    <div id="conn-dot"></div>
+    <span id="conn-label">Connecting…</span>
+  </div>
+</header>
+
+<div class="layout">
+
+  <!-- ── Sidebar ── -->
+  <aside>
+    <div class="panel-title">Discovered Devices</div>
+    <div class="device-list" id="device-list"></div>
+
+    <div class="selector-section">
+      <div>
+        <label>Transmitter (Source)</label>
+        <select id="tx-device"></select>
+        <select id="tx-channel" style="margin-top:4px"></select>
+      </div>
+      <div>
+        <label>Receiver (Destination)</label>
+        <select id="rx-device"></select>
+        <select id="rx-channel" style="margin-top:4px"></select>
+      </div>
+      <div class="btn-row">
+        <button class="btn" id="add-btn" style="flex:1" onclick="addCrossPoint()">Add Cross Point</button>
+      </div>
+      <div class="btn-row">
+        <button class="btn secondary" style="flex:1" onclick="addAllTx()">Monitor All Tx</button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ── Main ── -->
+  <main>
+    <div class="meter-toolbar">
+      <span class="label">Active cross points:</span>
+      <span class="value" id="cp-count">0</span>
+      <button class="btn secondary" id="hold-btn" onclick="togglePeakHold()">Peak Hold</button>
+      <button class="btn secondary" id="clear-btn" onclick="clearAll()">Clear All</button>
+    </div>
+    <div class="meter-grid" id="meter-grid">
+      <div class="empty-state" id="empty-state">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <rect x="2" y="3" width="4" height="18" rx="1"/>
+          <rect x="8" y="7" width="4" height="14" rx="1"/>
+          <rect x="14" y="5" width="4" height="16" rx="1"/>
+          <rect x="20" y="9" width="2" height="12" rx="1"/>
+        </svg>
+        <p>No cross points selected</p>
+        <p class="hint">Select a transmitter &amp; receiver<br>then click "Add Cross Point"</p>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+// ─── State ────────────────────────────────────────────────────────────────────
+let ws = null;
+let devices = {};
+let crossPoints = {}; // key -> { card, canvas, ctx, state }
+let peakHoldEnabled = true;
+
+// ─── WebSocket ────────────────────────────────────────────────────────────────
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}`);
+
+  ws.onopen = () => setStatus('connected', 'Connected');
+
+  ws.onclose = () => {
+    setStatus('error', 'Disconnected');
+    setTimeout(connect, 2000);
+  };
+
+  ws.onerror = () => setStatus('error', 'Error');
+
+  ws.onmessage = ({ data }) => {
+    const msg = JSON.parse(data);
+    if (msg.type === 'devices') onDevices(msg.data);
+    if (msg.type === 'levels')  onLevels(msg.data);
+  };
+}
+
+function setStatus(cls, text) {
+  document.getElementById('conn-dot').className = cls;
+  document.getElementById('conn-label').textContent = text;
+}
+
+// ─── Device handling ──────────────────────────────────────────────────────────
+function onDevices(list) {
+  devices = {};
+  for (const d of list) devices[d.id] = d;
+  renderDeviceList();
+  populateSelectors();
+}
+
+function renderDeviceList() {
+  const el = document.getElementById('device-list');
+  el.innerHTML = '';
+  for (const d of Object.values(devices)) {
+    el.innerHTML += `
+      <div class="device-item">
+        <div class="dev-name">${esc(d.name)}</div>
+        <div class="dev-addr">${esc(d.address)}</div>
+        <div>
+          <span class="dev-badge ${d.real ? 'real' : ''}">${d.real ? 'Live' : 'Simulated'}</span>
+          <span class="dev-badge" style="margin-left:3px">${d.txChannels.length}Tx/${d.rxChannels.length}Rx</span>
+        </div>
+      </div>`;
+  }
+}
+
+function populateSelectors() {
+  const devList = Object.values(devices);
+  for (const selId of ['tx-device', 'rx-device']) {
+    const sel = document.getElementById(selId);
+    const prev = sel.value;
+    sel.innerHTML = devList.map(d => `<option value="${d.id}">${esc(d.name)}</option>`).join('');
+    if (prev && devices[prev]) sel.value = prev;
+  }
+  updateChannelSelectors();
+}
+
+function updateChannelSelectors() {
+  const txDev = devices[document.getElementById('tx-device').value];
+  const rxDev = devices[document.getElementById('rx-device').value];
+  const txCh  = document.getElementById('tx-channel');
+  const rxCh  = document.getElementById('rx-channel');
+
+  if (txDev) {
+    txCh.innerHTML = txDev.txChannels.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+  }
+  if (rxDev) {
+    rxCh.innerHTML = rxDev.rxChannels.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+  }
+}
+
+document.getElementById('tx-device').addEventListener('change', updateChannelSelectors);
+document.getElementById('rx-device').addEventListener('change', updateChannelSelectors);
+
+// ─── Cross point management ────────────────────────────────────────────────────
+function cpKey(txDev, txCh, rxDev, rxCh) {
+  return `${txDev}:${txCh}:${rxDev}:${rxCh}`;
+}
+
+function addCrossPoint() {
+  const txDev = document.getElementById('tx-device').value;
+  const txCh  = parseInt(document.getElementById('tx-channel').value, 10);
+  const rxDev = document.getElementById('rx-device').value;
+  const rxCh  = parseInt(document.getElementById('rx-channel').value, 10);
+  if (!txDev || !rxDev) return;
+  addCrossPointByIds(txDev, txCh, rxDev, rxCh);
+}
+
+function addAllTx() {
+  const txDev = document.getElementById('tx-device').value;
+  const rxDev = document.getElementById('rx-device').value;
+  if (!txDev || !rxDev || !devices[txDev] || !devices[rxDev]) return;
+
+  ws.send(JSON.stringify({ type: 'subscribeAll', txDevice: txDev, rxDevice: rxDev }));
+
+  const txD = devices[txDev];
+  const rxD = devices[rxDev];
+  for (const tx of txD.txChannels) {
+    for (const rx of rxD.rxChannels) {
+      const key = cpKey(txDev, tx.id, rxDev, rx.id);
+      if (!crossPoints[key]) {
+        createMeterCard(key, txD, tx, rxD, rx);
+      }
+    }
+  }
+  updateCount();
+}
+
+function addCrossPointByIds(txDev, txCh, rxDev, rxCh) {
+  const key = cpKey(txDev, txCh, rxDev, rxCh);
+  if (crossPoints[key]) return;
+
+  ws.send(JSON.stringify({ type: 'subscribe', txDevice: txDev, txChannel: txCh, rxDevice: rxDev, rxChannel: rxCh }));
+
+  const txD = devices[txDev];
+  const rxD = devices[rxDev];
+  const tx  = txD && txD.txChannels.find(c => c.id === txCh);
+  const rx  = rxD && rxD.rxChannels.find(c => c.id === rxCh);
+  createMeterCard(key, txD, tx, rxD, rx);
+  updateCount();
+}
+
+function removeCrossPoint(key) {
+  const cp = crossPoints[key];
+  if (!cp) return;
+  cp.card.remove();
+  delete crossPoints[key];
+  ws.send(JSON.stringify({ type: 'unsubscribe', ...parseKey(key) }));
+  updateCount();
+}
+
+function parseKey(key) {
+  const [txDevice, txChannel, rxDevice, rxChannel] = key.split(':');
+  return { txDevice, txChannel: parseInt(txChannel), rxDevice, rxChannel: parseInt(rxChannel) };
+}
+
+function clearAll() {
+  for (const key of Object.keys(crossPoints)) removeCrossPoint(key);
+}
+
+function updateCount() {
+  const n = Object.keys(crossPoints).length;
+  document.getElementById('cp-count').textContent = n;
+  document.getElementById('empty-state').style.display = n === 0 ? '' : 'none';
+}
+
+function togglePeakHold() {
+  peakHoldEnabled = !peakHoldEnabled;
+  document.getElementById('hold-btn').classList.toggle('active', peakHoldEnabled);
+}
+
+// ─── Meter card creation ────────────────────────────────────────────────────────
+const SCALE_MARKS = [0, -3, -6, -10, -14, -20, -30, -40, -60];
+
+function createMeterCard(key, txDev, txCh, rxDev, rxCh) {
+  const card = document.createElement('div');
+  card.className = 'vu-card';
+  card.dataset.key = key;
+
+  const txLabel = txCh ? txCh.name : key.split(':')[1];
+  const rxLabel = rxCh ? rxCh.name : key.split(':')[3];
+  const shortTx = txLabel.replace(/.*\s/, '');
+  const shortRx = rxLabel.replace(/.*\s/, '');
+
+  card.innerHTML = `
+    <div class="card-label"><b>${esc(shortTx)}→${esc(shortRx)}</b>${esc(txDev ? txDev.name : '')}</div>
+    <div style="position:relative;display:flex;gap:2px">
+      <canvas class="meter-canvas" width="14" height="320" style="width:14px;height:160px;border-radius:3px 0 0 3px"></canvas>
+      <canvas class="meter-canvas" width="14" height="320" style="width:14px;height:160px;border-radius:0 3px 3px 0"></canvas>
+      <div class="scale">${SCALE_MARKS.map(v => `<span>${v === 0 ? '0' : v}</span>`).join('')}</div>
+    </div>
+    <div class="clip-led" title="Clip"></div>
+    <div class="db-readout">−∞</div>
+    <button class="close-btn" title="Remove" onclick="removeCrossPoint('${key}')">✕</button>
+  `;
+
+  const canvases = card.querySelectorAll('canvas');
+  const ctxL = canvases[0].getContext('2d');
+  const ctxR = canvases[1].getContext('2d');
+
+  crossPoints[key] = {
+    card,
+    ctxL, ctxR,
+    clipLed:  card.querySelector('.clip-led'),
+    dbReadout: card.querySelector('.db-readout'),
+    levels: { rms: -60, peak: -60, peakHold: -60, clip: false },
+  };
+
+  document.getElementById('meter-grid').appendChild(card);
+  document.getElementById('empty-state').style.display = 'none';
+
+  // Draw initial blank state
+  drawMeter(ctxL, -60, -60, -60, false);
+  drawMeter(ctxR, -60, -60, -60, false);
+}
+
+// ─── Level handling ───────────────────────────────────────────────────────────
+function onLevels(data) {
+  for (const [key, lvl] of Object.entries(data)) {
+    const cp = crossPoints[key];
+    if (!cp) continue;
+    cp.levels = lvl;
+  }
+}
+
+// ─── Rendering loop (rAF) ────────────────────────────────────────────────────
+function renderLoop() {
+  for (const cp of Object.values(crossPoints)) {
+    const { ctxL, ctxR, clipLed, dbReadout, levels } = cp;
+    const { rms, peak, peakHold, clip } = levels;
+
+    // Slight offset between L and R for realism
+    const rmsR = Math.max(-60, rms + (Math.random() - 0.5) * 0.6);
+    drawMeter(ctxL, rms,  peak, peakHoldEnabled ? peakHold : peak, clip);
+    drawMeter(ctxR, rmsR, peak + (Math.random() - 0.5) * 0.3, peakHoldEnabled ? peakHold : peak, clip);
+
+    clipLed.classList.toggle('active', clip);
+
+    const val = rms < -59 ? '−∞' : (rms >= 0 ? '+' + rms.toFixed(1) : rms.toFixed(1));
+    dbReadout.textContent = val;
+    dbReadout.className = 'db-readout' + (rms >= 0 ? ' red' : rms >= -6 ? ' yellow' : '');
+  }
+  requestAnimationFrame(renderLoop);
+}
+
+// ─── Canvas meter drawing ──────────────────────────────────────────────────────
+function dbToY(db, h) {
+  // Map −60dB→bottom, 0dB→top (plus a tiny clip region at top)
+  const clamped = Math.max(-60, Math.min(3, db));
+  return h * (1 - (clamped + 60) / 63);
+}
+
+function meterColor(db) {
+  if (db >= 0)   return '#ff2020';
+  if (db >= -6)  return '#f59e0b';
+  if (db >= -18) return '#22c55e';
+  return '#16a34a';
+}
+
+function drawMeter(ctx, rms, peak, peakHold, clip) {
+  const w = ctx.canvas.width;
+  const h = ctx.canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  // Background gradient (segmented look)
+  drawSegments(ctx, w, h);
+
+  // RMS bar
+  const yRms = dbToY(rms, h);
+  const barH = h - yRms;
+  if (barH > 0) {
+    const grad = ctx.createLinearGradient(0, yRms, 0, h);
+    grad.addColorStop(0,   meterColor(rms));
+    grad.addColorStop(0.4, '#22c55e');
+    grad.addColorStop(1,   '#16a34a');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, yRms, w, barH);
+  }
+
+  // Peak tick
+  if (peak > -60) {
+    const yPeak = dbToY(peak, h);
+    ctx.fillStyle = meterColor(peak);
+    ctx.fillRect(0, yPeak, w, 2);
+  }
+
+  // Peak hold tick
+  if (peakHold > -60) {
+    const yHold = dbToY(peakHold, h);
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.fillRect(0, yHold, w, 1);
+  }
+
+  // Clip region tint
+  if (clip) {
+    ctx.fillStyle = 'rgba(255,0,0,0.25)';
+    ctx.fillRect(0, 0, w, dbToY(0, h));
+  }
+}
+
+function drawSegments(ctx, w, h) {
+  const segH = 3;
+  const gap  = 1;
+  const step  = segH + gap;
+  for (let y = 0; y < h; y += step) {
+    const db = -60 + (1 - y / h) * 63;
+    let col;
+    if (db >= 0)   col = '#2a0808';
+    else if (db >= -6)  col = '#2a1e00';
+    else col = '#0a1a0a';
+    ctx.fillStyle = col;
+    ctx.fillRect(0, y, w, segH);
+  }
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+}
+
+// ─── Boot ────────────────────────────────────────────────────────────────────
+connect();
+updateCount();
+requestAnimationFrame(renderLoop);
+</script>
+</body>
+</html>
