@@ -71,7 +71,7 @@ function startDiscovery(ifaceName) {
     for (const line of lines) {
       console.log('[dns-sd browse]', line);
       // Output format: "HH:MM:SS.mmm  Add   <flags>  <ifindex>  <domain>  <regtype>  <instance>"
-      const m = line.match(/^\d+:\d+:\d+\.\d+\s+Add\s+\S+\s+\S+\s+\S+\s+\S+\s+(.+)$/);
+      const m = line.match(/^\s*\d+:\d+:\d+\.\d+\s+Add\s+\S+\s+\S+\s+\S+\s+\S+\s+(.+)$/);
       if (m) resolveInstance(m[1].trim());
     }
   });
