@@ -405,7 +405,17 @@ function onNetworkDevices(list) {
 function onSimLevels(data) {
   for (const [key, lvl] of Object.entries(data)) {
     const cp = crossPoints[key];
-    if (cp && !cp.realAudio) cp.levels = lvl;
+    if (cp && !cp.realAudio) {
+      cp.levels = lvl;
+      // Update LIVE/SIM badge based on whether server has real multicast data
+      const tag = cp.card.querySelector('.source-tag');
+      if (tag) {
+        const isLive = !!lvl.live;
+        tag.textContent = isLive ? 'LIVE' : 'SIM';
+        tag.className = 'source-tag' + (isLive ? '' : ' sim');
+        cp.card.classList.toggle('real-audio', isLive);
+      }
+    }
   }
 }
 
