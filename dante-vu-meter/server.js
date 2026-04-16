@@ -90,63 +90,76 @@ function parseAudinatePacket(msg, srcAddr) {
   let levels = extractLevels(vals);
   if (levels.length === 0) return;
 
+  // Log first parse from each device for diagnostics
+  if (!deviceLevels.has(srcAddr)) {
+    console.log(`[dante-meter] ${srcAddr}: ${levels.length} ch — first levels: ${levels.slice(0,4).map(v => v.toFixed(1)).join(', ')} dBFS`);
+  }
   deviceLevels.set(srcAddr, { channels: levels, updatedAt: Date.now() });
 }
 
 function extractLevels(vals) {
-  // Dante metering TLV structure (reverse-engineered):
-  // After magic: [type(u8), len(u8), ...] repeated blocks
-  // Each metering block: header bytes, then numChannels * 2 bytes of int16 level values
+  // Dante metering packet structure (reverse-engineered from captures):
   //
-  // Observed packet layout (int16 pairs after magic):
-  //   [0]  type/flags
-  //   [1]  sub-type
-  //   [2]  0x1000 (4096) — block marker
-  //   [3]  0
-  //   [4]  payload length in bytes
-  //   [5]  -32768 (0x8000) — flags
-  //   [6]  4
-  //   [7]  4
-  //   [8]  sequence number (incrementing)
-  //   [9]  0
-  //   [10] numChannels (e.g. 16)
-  //   [11] 0
-  //   [12] channelBlock (1)
-  //   [13] numChannels again
-  //   [14] 6 (sub-block type)
-  //   [15..15+numCh-1] level values
+  //   [i+0]  0x1000 (4096) — block marker
+  //   [i+1]  0
+  //   [i+2]  block length in bytes
+  //   [i+3]  0x8000 flags
+  //   [i+4]  4
+  //   [i+5]  4
+  //   [i+6]  sequence number
+  //   [i+7]  0
+  //   [i+8]  total device channel count
+  //   [i+9]  0
+  //   [i+10] active channel count (channels with metering data)
+  //   ...
+  //   [typeIdx] 6 — metering sub-type marker
+  //   [typeIdx+1 .. ] per-channel records, each 4 int16s:
+  //      [0] signed peak value  (negative, quasi-constant)
+  //      [1] 0
+  //      [2] unsigned RMS value (positive, tracks audio level)
+  //      [3] 0
   //
-  // For multi-block packets the pattern repeats.
+  // We want the RMS value (every 4th int16 starting at typeIdx+3).
 
   const levels = [];
-
-  // Try to find the 0x1000 (4096) block marker and parse from there
   let i = 0;
-  while (i < vals.length) {
-    if (vals[i] === 4096 && i >= 2) {
-      // Potential block start — numChannels is at offset +8 from the 4096
-      const numCh = vals[i + 8];
-      if (numCh > 0 && numCh <= 64 && i + 8 + numCh < vals.length) {
-        // sub-block type 6 contains levels at i+12
-        if (vals[i + 11] === 6 || vals[i + 12] === 6) {
-          const start = (vals[i + 11] === 6) ? i + 12 : i + 13;
-          for (let ch = 0; ch < numCh; ch++) {
-            const raw = vals[start + ch];
-            levels.push(rawToDbfs(raw));
-          }
-          i = start + numCh;
-          continue;
+
+  while (i < vals.length - 12) {
+    if (vals[i] === 4096) {
+      // Search for the type=6 metering sub-block within the next ~30 values
+      let typeIdx = -1;
+      for (let j = i + 8; j < Math.min(i + 30, vals.length); j++) {
+        if (vals[j] === 6) { typeIdx = j; break; }
+      }
+
+      if (typeIdx >= 0) {
+        // Per-channel record layout after type=6:
+        //   [typeIdx+1] peak_ch1  (signed, negative-ish)
+        //   [typeIdx+2] 0
+        //   [typeIdx+3] rms_ch1   (unsigned, positive — this is the audio level)
+        //   [typeIdx+4] 0
+        //   [typeIdx+5] peak_ch2 ...
+        //
+        // Active channel count is 2 positions before the type=6 marker
+        const numActive = vals[typeIdx - 2];
+        const limit = (numActive > 0 && numActive <= 64) ? numActive : 16;
+
+        for (let k = 0; k < limit; k++) {
+          const j = typeIdx + 3 + k * 4;
+          if (j >= vals.length) break;
+          const v = vals[j];
+          levels.push(v > 0 ? rawToDbfs(v) : -60);
         }
+        break;
       }
     }
     i++;
   }
 
-  // Fallback: if structure parse failed, grab all non-trivial positive values
-  // that look like amplitude readings (between 100 and 32767)
+  // Fallback: scan for positive amplitude values if structure parse found nothing
   if (levels.length === 0) {
     for (const v of vals) {
-      if (v > 100 && v < 32768) levels.push(rawToDbfs(v));
+      if (v > 50 && v < 30000) levels.push(rawToDbfs(v));
     }
   }
 
