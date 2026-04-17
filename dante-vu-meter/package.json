@@ -1,0 +1,19 @@
+{
+  "name": "dante-vu-meter",
+  "version": "1.0.0",
+  "description": "Real-time VU meter web app for Dante network audio cross points",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^5.2.1",
+    "mdns-js": "^1.0.3",
+    "multicast-dns": "^7.2.5",
+    "ws": "^8.20.0"
+  }
+}
