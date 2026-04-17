@@ -102,70 +102,61 @@ function parseAudinatePacket(msg, srcAddr) {
 }
 
 function extractLevels(vals) {
-  // Dante metering packet structure (reverse-engineered from captures):
+  // Dante metering packet structure (empirically verified from packet captures):
   //
-  //   [i+0]  0x1000 (4096) — block marker
-  //   [i+1]  0
-  //   [i+2]  block length in bytes
-  //   [i+3]  0x8000 flags
-  //   [i+4]  4
-  //   [i+5]  4
-  //   [i+6]  sequence number
-  //   [i+7]  0
-  //   [i+8]  total device channel count
-  //   [i+9]  0
-  //   [i+10] active channel count (channels with metering data)
-  //   ...
-  //   [typeIdx] 6 — metering sub-type marker
-  //   [typeIdx+1 .. ] per-channel records, each 4 int16s:
-  //      [0] signed peak value  (negative, quasi-constant)
-  //      [1] 0
-  //      [2] unsigned RMS value (positive, tracks audio level)
-  //      [3] 0
+  // After a 0x1000 (4096) block marker, there is a metering sub-block identified
+  // by the 3-value pattern: [numActive][channelCount][subtype]
+  //   numActive:    1–32  (channels with level data in this packet)
+  //   channelCount: 8–64  (total device channels, e.g. 16)
+  //   subtype:      4 or 6 (both observed across devices)
   //
-  // We want the RMS value (every 4th int16 starting at typeIdx+3).
+  // Per-channel record (4 int16s each) starting at typeIdx+1:
+  //   [+1] signed peak value
+  //   [+2] format indicator: 0 = amplitude, non-zero = signed dBFS×256
+  //   [+3] level value
+  //   [+4] 0 padding
+  //
+  // Level decoding:
+  //   format=0, level>0  → rawToDbfs(level)   unsigned linear amplitude 0–32767
+  //   format≠0, level<0  → level/256           signed dBFS in 1/256-dB units
+  //   otherwise          → -60 (silence)
 
   const levels = [];
   let i = 0;
 
-  while (i < vals.length - 12) {
+  while (i < vals.length) {
     if (vals[i] === 4096) {
-      // Search for the type=6 metering sub-block within the next ~30 values
       let typeIdx = -1;
-      for (let j = i + 8; j < Math.min(i + 30, vals.length); j++) {
-        if (vals[j] === 6) { typeIdx = j; break; }
+      for (let j = i + 8; j < Math.min(i + 40, vals.length); j++) {
+        const sub = vals[j];
+        if ((sub === 4 || sub === 6) &&
+            vals[j - 1] >= 8  && vals[j - 1] <= 64 &&
+            vals[j - 2] >= 1  && vals[j - 2] <= 32) {
+          typeIdx = j;
+          break;
+        }
       }
 
       if (typeIdx >= 0) {
-        // Per-channel record layout after type=6:
-        //   [typeIdx+1] peak_ch1  (signed, negative-ish)
-        //   [typeIdx+2] 0
-        //   [typeIdx+3] rms_ch1   (unsigned, positive — this is the audio level)
-        //   [typeIdx+4] 0
-        //   [typeIdx+5] peak_ch2 ...
-        //
-        // Active channel count is 2 positions before the type=6 marker
         const numActive = vals[typeIdx - 2];
-        const limit = (numActive > 0 && numActive <= 64) ? numActive : 16;
-
-        for (let k = 0; k < limit; k++) {
-          const j = typeIdx + 3 + k * 4;
-          if (j >= vals.length) break;
-          const v = vals[j];
-          levels.push(v > 0 ? rawToDbfs(v) : -60);
+        for (let k = 0; k < numActive; k++) {
+          const fmtIdx = typeIdx + 2 + k * 4;
+          const lvlIdx = typeIdx + 3 + k * 4;
+          if (lvlIdx >= vals.length) break;
+          const fmt = vals[fmtIdx];
+          const lvl = vals[lvlIdx];
+          if (fmt === 0 && lvl > 0) {
+            levels.push(rawToDbfs(lvl));       // unsigned amplitude
+          } else if (lvl < 0) {
+            levels.push(Math.max(-60, Math.min(3, lvl / 256))); // signed dBFS×256
+          } else {
+            levels.push(-60);
+          }
         }
         break;
       }
     }
     i++;
-  }
-
-  // Fallback: scan for plausible positive amplitude values
-  // Exclude known non-level markers: 4096 (0x1000 block marker), small header values
-  if (levels.length === 0) {
-    for (const v of vals) {
-      if (v > 200 && v < 30000 && v !== 4096) levels.push(rawToDbfs(v));
-    }
   }
 
   return levels;
