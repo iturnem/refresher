@@ -382,7 +382,11 @@ function setIfaceStatus(msg, type) {
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}`);
-  ws.onopen  = () => setStatus('connected', 'Connected');
+  ws.onopen  = () => {
+    setStatus('connected', 'Connected');
+    // Re-subscribe to any existing network cross points after reconnect
+    resubscribeAll();
+  };
   ws.onclose = () => { setStatus('error', 'Disconnected'); setTimeout(connectWS, 2000); };
   ws.onerror = () => setStatus('error', 'Error');
   ws.onmessage = ({ data }) => {
@@ -390,6 +394,14 @@ function connectWS() {
     if (msg.type === 'devices') onNetworkDevices(msg.data);
     if (msg.type === 'levels')  onSimLevels(msg.data);
   };
+}
+
+function resubscribeAll() {
+  for (const key of Object.keys(crossPoints)) {
+    if (key.startsWith('audio:')) continue;
+    const [txDevice, txChannel, rxDevice, rxChannel] = key.split(':');
+    ws.send(JSON.stringify({ type: 'subscribe', txDevice, txChannel: +txChannel, rxDevice, rxChannel: +rxChannel }));
+  }
 }
 function setStatus(cls, text) {
   document.getElementById('conn-dot').className  = cls;

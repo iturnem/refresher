@@ -303,6 +303,23 @@ app.get('/api/interfaces', (_req, res) => {
   res.json(getInterfaces());
 });
 
+app.get('/api/status', (_req, res) => {
+  const levels = {};
+  for (const [addr, entry] of deviceLevels) {
+    levels[addr] = {
+      channels: entry.channels.map(v => +v.toFixed(1)),
+      ageMs: Date.now() - entry.updatedAt,
+    };
+  }
+  res.json({
+    devices: [...devices.values()].map(d => ({ id: d.id, address: d.address, real: d.real })),
+    deviceLevels: levels,
+    activeCrossPoints: [...activeCrossPoints.keys()],
+    realCrossPoints: [...realCrossPoints.keys()],
+    udpListening: udpSocket !== null,
+  });
+});
+
 app.post('/api/discover', (req, res) => {
   const { interface: ifaceAddr } = req.body;
   if (!ifaceAddr) return res.status(400).json({ error: 'interface address required' });
