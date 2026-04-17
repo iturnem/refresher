@@ -59,11 +59,9 @@ let udpSocket   = null;
 let udpIfaceAddr = null;
 
 function rawToDbfs(raw) {
-  // Raw values are Q15 unsigned linear amplitude (0–32767 ≈ 0 dBFS)
-  // Negative raw values are clipped/overload indicators — treat as near 0 dBFS
-  const abs = Math.abs(raw);
-  if (abs < 1) return -60;
-  return Math.max(-60, Math.min(3, 20 * Math.log10(abs / 32768)));
+  // Only positive values are valid RMS amplitudes — reject negatives/zero
+  if (raw < 1) return -60;
+  return Math.max(-60, Math.min(3, 20 * Math.log10(raw / 32768)));
 }
 
 function parseAudinatePacket(msg, srcAddr) {
@@ -80,21 +78,27 @@ function parseAudinatePacket(msg, srcAddr) {
     vals.push(payload.readInt16BE(i));
   }
 
-  // Heuristic: find positive values that could be level readings.
-  // From empirical analysis:
-  //   Short packets (~30 vals): channel count at index 10, levels start at index 15
-  //   Larger packets:           similar structure repeated per channel block
-  //
-  // We scan for a "channel count" marker at known offsets and extract levels.
-  // Fallback: collect all clearly positive values as channel levels.
-  let levels = extractLevels(vals);
+  // Track packet count per device for diagnostics
+  if (!deviceLevels.has(srcAddr)) {
+    deviceLevels.set(srcAddr, { channels: [], updatedAt: 0, pktCount: 0 });
+  }
+  const entry = deviceLevels.get(srcAddr);
+  entry.pktCount = (entry.pktCount || 0) + 1;
+
+  // Log raw int16 values for first 3 packets — paste these to diagnose parsing
+  if (entry.pktCount <= 3) {
+    console.log(`[dante-meter] ${srcAddr} pkt#${entry.pktCount} (${vals.length} vals): ${vals.join(', ')}`);
+  }
+
+  const levels = extractLevels(vals);
   if (levels.length === 0) return;
 
-  // Log first parse from each device for diagnostics
-  if (!deviceLevels.has(srcAddr)) {
-    console.log(`[dante-meter] ${srcAddr}: ${levels.length} ch — first levels: ${levels.slice(0,4).map(v => v.toFixed(1)).join(', ')} dBFS`);
+  if (entry.pktCount <= 3) {
+    console.log(`[dante-meter] ${srcAddr} → parsed levels: ${levels.slice(0,8).map(v => v.toFixed(1)).join(', ')} dBFS`);
   }
-  deviceLevels.set(srcAddr, { channels: levels, updatedAt: Date.now() });
+
+  entry.channels  = levels;
+  entry.updatedAt = Date.now();
 }
 
 function extractLevels(vals) {
@@ -156,10 +160,11 @@ function extractLevels(vals) {
     i++;
   }
 
-  // Fallback: scan for positive amplitude values if structure parse found nothing
+  // Fallback: scan for plausible positive amplitude values
+  // Exclude known non-level markers: 4096 (0x1000 block marker), small header values
   if (levels.length === 0) {
     for (const v of vals) {
-      if (v > 50 && v < 30000) levels.push(rawToDbfs(v));
+      if (v > 200 && v < 30000 && v !== 4096) levels.push(rawToDbfs(v));
     }
   }
 
